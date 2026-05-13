@@ -1,74 +1,85 @@
 {
-  "will-barker-address-the-canvas-leak-next-year-12-assembly-4pa2": {
-    "outcome_id": "01KR2W2MR217J1WF890ST3QDFC",
-    "label": "Yes",
-    "shares": 13000,
-    "buy_price": 0.716,
-    "yes_no": "yes",
-    "closed": true
-  },
-  "will-leaving-early-and-or-arriving-late-in-free-periods-be-m-5cf5": {
-    "outcome_id": "01KQRHKQQTYRT49ZS5RF0AFQ3C",
-    "label": "Yes",
-    "shares": 6000,
-    "buy_price": 0.7265537111581747,
-    "yes_no": "yes"
-  },
-  "will-year-10-get-science-marks-back-within-the-week-1i1v": {
-    "outcome_id": "01KQV5HWMKY2QR2YRBKW6QBD9Q",
-    "label": "No",
-    "shares": 7000,
-    "buy_price": 0.7013632477971398,
-    "yes_no": "yes"
-  },
-  "will-there-be-another-talk-about-phones-in-lockers-during-ma-1gc2": {
-    "outcome_id": "01KQGP49YJ120EZ5Y2EEFK4F78",
-    "label": "No",
-    "shares": 6000,
-    "buy_price": 0.7545254218063034,
-    "yes_no": "yes"
-  },
-  "will-this-market-resolve-to-yes-4x6c": {
-    "outcome_id": "01KRAEV45XZJ9TFJCVEZ928A6G",
-    "label": "No",
-    "shares": 8000,
-    "buy_price": 0.7443421411696177,
-    "yes_no": "yes"
-  },
-  "will-garrusvakarian-be-1-1ok5": {
-    "outcome_id": "01KQJW850KR6AFEQEPGQ0TCEZ8",
-    "label": "No",
-    "shares": 8000,
-    "buy_price": 0.8710495466817508,
-    "yes_no": "yes"
-  },
-  "will-the-sprinklers-turn-on-during-the-cadet-126th-ceremonia-1q3d": {
-    "outcome_id": "01KR3DN42C4X6AX89263E2X2FF",
-    "label": "No",
-    "shares": 7000,
-    "buy_price": 0.8157581012246667,
-    "yes_no": "yes"
-  },
-  "will-amazing-grace-be-sung-in-year-12-chapel-in-week-4-3w2g": {
-    "outcome_id": "01KR2VB02Z6WAJJZK7X4NPCHXW",
-    "label": "No",
-    "shares": 6000,
-    "buy_price": 0.7601615072282186,
-    "yes_no": "yes"
-  },
-  "how-many-people-have-betted-on-this-website-by-the-end-of-ma-345n": {
-    "outcome_id": "01KR2TWGCY504BZ36ES65JXNG4",
-    "label": "1000+",
-    "shares": 9000,
-    "buy_price": 0.8133772500576151,
-    "yes_no": "yes"
-  },
-  "will-heth-reach-150k-market-cap-by-the-end-of-tuesday-6b14": {
-    "outcome_id": "01KRA8ZHFNWVT137XPBZ03DKK1",
-    "label": "No",
-    "shares": 8000,
-    "buy_price": 0.9125435458754911,
-    "yes_no": "yes",
-    "cost_spent": 7300
+  "_user": "awa",
+  "positions": {
+    "will-this-market-resolve-to-yes-4x6c": {
+      "outcome_id": "01KRAEV45XZJ9TFJCVEZ928A6G",
+      "label": "No",
+      "shares": 7000,
+      "buy_price": 0.8019297941708012,
+      "yes_no": "yes",
+      "cost_spent": 5612
+    },
+    "will-the-sprinklers-turn-on-during-the-cadet-126th-ceremonia-1q3d": {
+      "outcome_id": "01KR3DN42C4X6AX89263E2X2FF",
+      "label": "No",
+      "shares": 8000,
+      "buy_price": 0.8115513904451461,
+      "yes_no": "yes",
+      "cost_spent": 6486
+    },
+    "will-the-year-12-english-advanced-at3-have-a-image-as-the-st-6o6n": {
+      "outcome_id": "01KR3D0G3HXGM3MS6NTPS1FSYC",
+      "label": "Yes",
+      "shares": 7000,
+      "buy_price": 0.7152061855670103,
+      "yes_no": "yes",
+      "cost_spent": 4997
+    },
+    "will-amazing-grace-be-sung-in-year-12-chapel-in-week-4-3w2g": {
+      "outcome_id": "01KR2VB02Z6WAJJZK7X4NPCHXW",
+      "label": "No",
+      "shares": 7000,
+      "buy_price": 0.756394640682095,
+      "yes_no": "yes",
+      "cost_spent": 5287
+    },
+    "will-mrbeast-say-oh-great-googly-moogly-in-the-next-2-months-595u": {
+      "outcome_id": "01KR2T8T7HTVYGH7525B29QSA0",
+      "label": "No",
+      "shares": 7000,
+      "buy_price": 0.7734219981766504,
+      "yes_no": "yes",
+      "cost_spent": 5410
+    },
+    "when-will-year-11-engineering-studies-test-come-back-4jz2": {
+      "outcome_id": "01KR2RXH05FD7RRMDC5V3WYYHV",
+      "label": "Monday 11th",
+      "shares": 8000,
+      "buy_price": 0.7334854243178559,
+      "yes_no": "yes",
+      "cost_spent": 5863
+    },
+    "will-canvas-be-back-before-july-615b": {
+      "outcome_id": "01KR2QV4VYA4XTGQ6Y3Z0ANWW4",
+      "label": "Yes",
+      "shares": 8000,
+      "buy_price": 0.9298023937383735,
+      "yes_no": "yes",
+      "cost_spent": 7437
+    },
+    "will-year-10-maths-get-back-by-may-14th-1mh2": {
+      "outcome_id": "01KQZZQ6YSX7QY896DQKGP85JG",
+      "label": "Yes",
+      "shares": 8000,
+      "buy_price": 0.8176256591193453,
+      "yes_no": "yes",
+      "cost_spent": 6541
+    },
+    "will-senior-assassins-be-shut-down-before-the-end-of-next-we-224b": {
+      "outcome_id": "01KQVQG8DQEYVHR7F2SYBMZH9F",
+      "label": "No",
+      "shares": 7000,
+      "buy_price": 0.9299182182273513,
+      "yes_no": "yes",
+      "cost_spent": 6501
+    },
+    "will-year-10-get-science-marks-back-within-the-week-1i1v": {
+      "outcome_id": "01KQV5HWMKY2QR2YRBKW6QBD9Q",
+      "label": "No",
+      "shares": 8000,
+      "buy_price": 0.746499232375805,
+      "yes_no": "yes",
+      "cost_spent": 5971
+    }
   }
 }

@@ -1,11 +1,11 @@
+import getpass
 import requests
 
-API_KEY = "bm_Qwl9YwRoch3J4kdjxpJDHRiVS5mFHcCBdT9j5Hziwlw"
 BASE_URL = "https://borker.college/api/v1"
 
 
 class BorkerClient:
-    def __init__(self, api_key: str = API_KEY):
+    def __init__(self, api_key: str):
         self.session = requests.Session()
         self.session.headers.update({"Authorization": f"Bearer {api_key}"})
 
@@ -93,7 +93,8 @@ class BorkerClient:
 if __name__ == "__main__":
     import json, sys
 
-    client = BorkerClient()
+    api_key = getpass.getpass("Enter your API key: ")
+    client = BorkerClient(api_key)
     args = sys.argv[1:]
 
     if not args or args[0] == "me":

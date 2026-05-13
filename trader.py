@@ -13,11 +13,11 @@ Philosophy
 5. Show a live portfolio summary every scan.
 """
 
-import time, json, os, signal, sys
+import getpass, time, json, os, signal, sys, socket
 from datetime import datetime, timezone
 import requests as _req
 from typing import Optional
-from main import BorkerClient, API_KEY, BASE_URL
+from main import BorkerClient, BASE_URL
 
 # ── Config ─────────────────────────────────────────────────────────────────────
 
@@ -33,6 +33,8 @@ SLEEP_SECONDS   = 60
 MAX_DAILY_SPEND = 100_000
 
 CACHE_FILE = os.path.join(os.path.dirname(__file__), "positions.json")
+KEY_FILE   = os.path.join(os.path.dirname(__file__), ".borker_key")
+_current_handle = None
 
 # ── Colours ────────────────────────────────────────────────────────────────────
 
@@ -77,15 +79,56 @@ def hdr(title: str):
 
 # ── Cache ──────────────────────────────────────────────────────────────────────
 
-def load_cache() -> dict:
+def load_cache():
     if os.path.exists(CACHE_FILE):
         with open(CACHE_FILE) as f:
-            return json.load(f)
-    return {}
+            data = json.load(f)
+        return data.get("_user"), data.get("positions", {})
+    return None, {}
 
-def save_cache(pos: dict):
+def save_cache(pos: dict, user: str):
     with open(CACHE_FILE, "w") as f:
-        json.dump(pos, f, indent=2)
+        json.dump({"_user": user, "positions": pos}, f, indent=2)
+
+# ── Encryption ────────────────────────────────────────────────────────────────
+
+_ALPHABET = "".join(chr(c) for c in [104,93,95,96,66,59,34,101,48,94,52,43,85,107,84,121,82,74,110,63,88,108,78,65,113,100,123,41,70,117,112,80,77,75,126,83,32,45,69,56,72,73,51,97,106,89,40,67,111,79,35,49,71,99,55,91,57,38,39,54,81,120,42,102,76,116,53,33,124,90,122,86,119,58,105,114,98,62,60,118,125,37,87,109,44,103,46,50,61,64,68,36,47,115])
+_ENC_KEY  = "!v8M}3 hQ`^qT.2YbK;>Rz[=6Xp@,&fA#0W$jI/~{eU'9Gs*-Ln(4Cd)7OF+:ZiP\"<Bk?|wNDogElm_Jy]V5rHuaxtcS%1"
+
+def _encrypt(text: str) -> str:
+    out, shift = [], 0
+    for ch in text:
+        j = _ALPHABET.find(ch)
+        if j == -1:
+            raise ValueError(f"Cannot encrypt character: {ch!r}")
+        shift = (shift + j) % len(_ENC_KEY)
+        out.append(_ENC_KEY[shift])
+    return "".join(out)
+
+def _decrypt(text: str) -> str:
+    out, shift = [], 0
+    for ch in text:
+        j = _ENC_KEY.find(ch)
+        if j == -1:
+            raise ValueError(f"Cannot decrypt character: {ch!r}")
+        alpha = (j - shift + len(_ENC_KEY)) % len(_ENC_KEY)
+        shift = (shift + alpha) % len(_ENC_KEY)
+        out.append(_ALPHABET[alpha])
+    return "".join(out)
+
+# ── API key storage ────────────────────────────────────────────────────────────
+
+def load_api_key():
+    if os.path.exists(KEY_FILE):
+        with open(KEY_FILE) as f:
+            data = json.load(f)
+        return _decrypt(data["key"]), _decrypt(data["device"])
+    return None, None
+
+def save_api_key(key: str):
+    with open(KEY_FILE, "w") as f:
+        json.dump({"key": _encrypt(key), "device": _encrypt(socket.gethostname())}, f)
+    os.chmod(KEY_FILE, 0o600)
 
 # ── Scoring ────────────────────────────────────────────────────────────────────
 
@@ -113,11 +156,11 @@ def trade_cost(s: float) -> int:
 
 # ── Position discovery ─────────────────────────────────────────────────────────
 
-def discover_positions(markets: list) -> dict:
+def discover_positions(markets: list, api_key: str) -> dict:
     """Probe every outcome for shares without executing a real sell."""
     found = {}
     sess = _req.Session()
-    sess.headers["Authorization"] = f"Bearer {API_KEY}"
+    sess.headers["Authorization"] = f"Bearer {api_key}"
     for m in markets:
         for o in m["outcomes"]:
             for yn in ["yes", "no"]:
@@ -148,22 +191,32 @@ def save_profit(data: dict):
         json.dump(data, f, indent=2)
 
 
-def run(positions: dict):
-    client = BorkerClient()
+def run(positions: dict, api_key: str):
+    global _current_handle
+    client = BorkerClient(api_key)
     me = client.me()
+    _current_handle = me["handle"]
     display_bal = me['balanceBarks'] / 1000
-
-    # Load or initialise profit tracking
-    profit_data = load_profit()
-    if "start_balance" not in profit_data:
-        profit_data["start_balance"] = me["balanceBarks"]
-        save_profit(profit_data)
-    start_balance = profit_data["start_balance"]
 
     if "trade" not in me.get("scopes", []):
         print(f"{RED}API key missing 'trade' scope.{R}"); return
 
-    positions.update(load_cache())
+    cached_user, cached_pos = load_cache()
+    user_changed = bool(cached_user and cached_user != me["handle"])
+    if user_changed:
+        print(f"{YEL}Different user detected ({cached_user} → {me['handle']}) — resetting cache.{R}")
+    else:
+        positions.update(cached_pos)
+
+    # Load or initialise profit tracking
+    profit_data = load_profit()
+    if user_changed and me["handle"] != "awa":
+        profit_data = {}
+        print(f"{YEL}Profit reset for new user.{R}")
+    if "start_balance" not in profit_data:
+        profit_data["start_balance"] = me["balanceBarks"]
+        save_profit(profit_data)
+    start_balance = profit_data["start_balance"]
 
     # seed momentum baseline
     prev_prices: dict[str, float] = {}
@@ -204,7 +257,7 @@ def run(positions: dict):
                 if not m:
                     print(f"  {DIM}✔ resolved  {slug[:52]}{R}")
                     del positions[slug]
-                    save_cache(positions)
+                    save_cache(positions, _current_handle)
                     continue
                 cur = next((o for o in m["outcomes"] if o["id"] == pos["outcome_id"]), None)
                 if not cur: continue
@@ -248,7 +301,7 @@ def run(positions: dict):
             m = by_slug.get(slug)
             if not m:
                 print(f"  {DIM}✔ resolved  {slug[:52]}{R}")
-                del positions[slug]; save_cache(positions); continue
+                del positions[slug]; save_cache(positions, _current_handle); continue
 
             cur = next((o for o in m["outcomes"] if o["id"] == pos["outcome_id"]), None)
             if not cur: continue
@@ -277,13 +330,13 @@ def run(positions: dict):
                         recovered = -result["costBarks"]
                         print(f"  {col}✔ recovered {recovered:,}  "
                               f"balance={result['newBalance']:,.0f}{R}")
-                        del positions[slug]; save_cache(positions)
+                        del positions[slug]; save_cache(positions, _current_handle)
                     except Exception as e:
                         resp = getattr(e, "response", None)
                         body = getattr(resp, "text", str(e))
                         if resp is not None and "market_not_open" in body:
                             positions[slug]["closed"] = True
-                            save_cache(positions)
+                            save_cache(positions, _current_handle)
                         else:
                             print(f"  {RED}✘ sell failed: {body}{R}")
                 else:
@@ -324,7 +377,7 @@ def run(positions: dict):
                         "yes_no":     "yes",
                         "cost_spent": result["costBarks"],
                     }
-                    save_cache(positions)
+                    save_cache(positions, _current_handle)
                     print(f"\n  {GRN}✔ new position  {m['title']}  "
                           f"{result['priceBefore']*100:.1f}%→{result['priceAfter']*100:.1f}% ({pp_moved:+.2f}pp){R}")
                 except Exception as e:
@@ -350,13 +403,27 @@ def run(positions: dict):
 
 
 if __name__ == "__main__":
+    _stored_key, _stored_device = load_api_key()
+    _this_device = socket.gethostname()
+
+    if _stored_key and _stored_device == _this_device:
+        _api_key = _stored_key
+    else:
+        if _stored_device and _stored_device != _this_device:
+            print(f"{YEL}New device detected — resetting and re-authenticating.{R}")
+            for _f in (CACHE_FILE, PROFIT_FILE):
+                if os.path.exists(_f):
+                    os.remove(_f)
+        _api_key = getpass.getpass("Enter your API key: ")
+        save_api_key(_api_key)
+
     _pos = {}
 
     def _shutdown(sig, frame):
-        save_cache(_pos)
+        save_cache(_pos, _current_handle)
         print(f"\n{YEL}Stopped — positions saved.{R}")
         sys.exit(0)
 
     signal.signal(signal.SIGINT, _shutdown)
     signal.signal(signal.SIGTERM, _shutdown)
-    run(_pos)
+    run(_pos, _api_key)
