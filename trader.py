@@ -13,7 +13,7 @@ Philosophy
 5. Show a live portfolio summary every scan.
 """
 
-import getpass, time, json, os, signal, sys, socket
+import getpass, time, json, os, signal, sys, socket, math, threading, select, termios, tty
 from datetime import datetime, timezone
 import requests as _req
 from typing import Optional
@@ -22,15 +22,17 @@ from main import BorkerClient, BASE_URL
 # ── Config ─────────────────────────────────────────────────────────────────────
 
 WIN_THRESHOLD   = 0.65    # minimum price to enter
-MAX_COST        = 10      # max spend per trade (scales down with lower confidence)
-MIN_COST        = 2       # min spend per trade
+MAX_COST        = 50_000 # max spend per trade (scales down with lower confidence)
+MIN_COST        = 10      # min spend per trade
 MAX_POSITIONS   = 10      # max concurrent holdings
 MIN_LIQUIDITY_Q = 500_000 # skip thin markets
 TAKE_PROFIT_PP  = 12      # sell when up this many pp from entry
 STOP_LOSS_PP    = 10      # sell when down this many pp from entry
 FLIP_THRESHOLD  = 0.55    # sell if our side drops below this (market flipped)
-SLEEP_SECONDS   = 60
-MAX_DAILY_SPEND = 100_000
+SLEEP_SECONDS      = 60
+MAX_DAILY_SPEND    = 100_000
+SCORE_TOP_UP_DELTA = 0.15    # top up if score rises this much above entry score
+MAX_POSITION_COST  = 50_000  # max total API-barks spent on a single position
 
 CACHE_FILE = os.path.join(os.path.dirname(__file__), "positions.json")
 KEY_FILE   = os.path.join(os.path.dirname(__file__), ".borker_key")
@@ -43,8 +45,8 @@ BOLD = "\033[1m"; DIM = "\033[2m"
 GRN = "\033[92m"; YEL = "\033[93m"; RED = "\033[91m"; CYN = "\033[96m"
 
 def clear_screen():
-    os.system("clear")
-    os.system("cls")
+    print("\n" * 100, end="")
+    os.system("cls" if os.name == "nt" else "clear")
 
 def bar(p: float, w: int = 18) -> str:
     n = round(p * w)
@@ -79,16 +81,26 @@ def hdr(title: str):
 
 # ── Cache ──────────────────────────────────────────────────────────────────────
 
+def _load_json_file(path: str) -> dict:
+    with open(path) as f:
+        raw = f.read().strip()
+    try:
+        return json.loads(_decrypt(raw))
+    except Exception:
+        return json.loads(raw)
+
+def _save_json_file(path: str, data: dict):
+    with open(path, "w") as f:
+        f.write(_encrypt(json.dumps(data, separators=(",", ":"))))
+
 def load_cache():
     if os.path.exists(CACHE_FILE):
-        with open(CACHE_FILE) as f:
-            data = json.load(f)
+        data = _load_json_file(CACHE_FILE)
         return data.get("_user"), data.get("positions", {})
     return None, {}
 
 def save_cache(pos: dict, user: str):
-    with open(CACHE_FILE, "w") as f:
-        json.dump({"_user": user, "positions": pos}, f, indent=2)
+    _save_json_file(CACHE_FILE, {"_user": user, "positions": pos})
 
 # ── Encryption ────────────────────────────────────────────────────────────────
 
@@ -132,23 +144,60 @@ def save_api_key(key: str):
 
 # ── Scoring ────────────────────────────────────────────────────────────────────
 
-def score_market(winner: dict, outcomes: list, prev_prices: dict) -> float:
+PRICE_SWEET_MAX = 0.88   # above this profit margin shrinks fast
+MIN_CLOSE_SECS  = 2 * 3600   # skip markets closing in < 2 hours
+
+def score_market(winner: dict, outcomes: list, prev_prices: dict, close_ms=None) -> float:
     """
-    Returns a confidence score 0→1 combining:
-      • Price strength   (50%) – how far above WIN_THRESHOLD
-      • Pool dominance   (30%) – winner's share of total pool
-      • Momentum         (20%) – is the winning price rising since last scan?
+    Score 0→1 across six factors:
+      • Sweet-spot price  (25%) – 65–88% scores best; near-certain markets penalised
+      • Consensus gap     (25%) – distance between #1 and #2 outcome
+      • Pool dominance    (15%) – winner's share of total pool
+      • Liquidity         (15%) – log-scaled pool size above minimum
+      • Momentum          (10%) – price rising since last scan
+      • Time to close     (10%) – prefers 1–7 day window; penalises same-hour or month+
     """
-    total_q   = sum(o["q"] for o in outcomes)
-    price     = winner["price"]
-    strength  = (price - WIN_THRESHOLD) / (1.0 - WIN_THRESHOLD)
+    total_q = sum(o["q"] for o in outcomes)
+    price   = winner["price"]
+
+    # 1. Sweet-spot price: ramps up 65→88%, fades above 88%
+    if price <= PRICE_SWEET_MAX:
+        strength = (price - WIN_THRESHOLD) / (PRICE_SWEET_MAX - WIN_THRESHOLD)
+    else:
+        strength = max(0.0, 1.0 - (price - PRICE_SWEET_MAX) / (1.0 - PRICE_SWEET_MAX))
+
+    # 2. Consensus gap between winner and runner-up
+    sorted_prices = sorted((o["price"] for o in outcomes), reverse=True)
+    gap       = sorted_prices[0] - sorted_prices[1] if len(sorted_prices) >= 2 else sorted_prices[0]
+    gap_score = min(gap / 0.40, 1.0)   # 40pp gap = perfect score
+
+    # 3. Pool dominance
     dominance = winner["q"] / total_q if total_q else 0
 
-    prev  = prev_prices.get(winner["id"], price)
-    delta = price - prev                          # positive = moving our way
-    momentum = min(max((delta + 0.05) / 0.10, 0), 1)  # normalise –5pp→+5pp to 0→1
+    # 4. Liquidity (log scale above minimum)
+    liq_score = min(math.log10(max(total_q / MIN_LIQUIDITY_Q, 1)) / 2.0, 1.0)
 
-    return strength * 0.5 + dominance * 0.3 + momentum * 0.2
+    # 5. Momentum
+    prev     = prev_prices.get(winner["id"], price)
+    momentum = min(max(((price - prev) + 0.05) / 0.10, 0), 1)
+
+    # 6. Time-to-close scoring
+    if close_ms:
+        secs = close_ms / 1000 - time.time()
+        if   secs < 6 * 3600:    time_score = 0.1   # closing too soon
+        elif secs < 86400:        time_score = 0.6   # same day
+        elif secs < 7 * 86400:   time_score = 1.0   # sweet spot 1–7 days
+        elif secs < 30 * 86400:  time_score = 0.7   # 1–4 weeks
+        else:                     time_score = 0.3   # very long-dated
+    else:
+        time_score = 0.4   # no close date — uncertain
+
+    return (strength  * 0.25 +
+            gap_score * 0.25 +
+            dominance * 0.15 +
+            liq_score * 0.15 +
+            momentum  * 0.10 +
+            time_score* 0.10)
 
 
 def trade_cost(s: float) -> int:
@@ -156,13 +205,17 @@ def trade_cost(s: float) -> int:
 
 # ── Position discovery ─────────────────────────────────────────────────────────
 
-def discover_positions(markets: list, api_key: str) -> dict:
+def discover_positions(markets: list, api_key: str, cancel=None) -> dict:
     """Probe every outcome for shares without executing a real sell."""
     found = {}
     sess = _req.Session()
     sess.headers["Authorization"] = f"Bearer {api_key}"
     for m in markets:
+        if cancel and cancel.is_set():
+            break
         for o in m["outcomes"]:
+            if cancel and cancel.is_set():
+                break
             for yn in ["yes", "no"]:
                 r = sess.post(f"{BASE_URL}/markets/{m['slug']}/trade",
                               json={"outcomeId": o["id"], "shares": -999999, "yesNo": yn})
@@ -182,13 +235,11 @@ PROFIT_FILE = os.path.join(os.path.dirname(__file__), "profit.json")
 
 def load_profit() -> dict:
     if os.path.exists(PROFIT_FILE):
-        with open(PROFIT_FILE) as f:
-            return json.load(f)
+        return _load_json_file(PROFIT_FILE)
     return {}
 
 def save_profit(data: dict):
-    with open(PROFIT_FILE, "w") as f:
-        json.dump(data, f, indent=2)
+    _save_json_file(PROFIT_FILE, data)
 
 
 def run(positions: dict, api_key: str):
@@ -208,6 +259,46 @@ def run(positions: dict, api_key: str):
     else:
         positions.update(cached_pos)
 
+    # Sync positions — runs in background, press any key to skip
+    _cancel   = threading.Event()
+    _result   = {}
+    _all_mkts = client.list_markets("open")
+
+    def _sync():
+        try:
+            _result.update(discover_positions(_all_mkts, api_key, _cancel))
+        except Exception:
+            pass
+
+    _t = threading.Thread(target=_sync, daemon=True)
+    _t.start()
+
+    print(f"{DIM}Scanning for existing positions… press any key to skip{R}", end="", flush=True)
+    _old_term = termios.tcgetattr(sys.stdin)
+    try:
+        tty.setraw(sys.stdin.fileno())
+        while _t.is_alive():
+            if select.select([sys.stdin], [], [], 0.2)[0]:
+                sys.stdin.read(1)
+                _cancel.set()
+                break
+    finally:
+        termios.tcsetattr(sys.stdin, termios.TCSADRAIN, _old_term)
+
+    _t.join()
+    print()  # newline after the prompt
+
+    if _cancel.is_set():
+        print(f"{DIM}Position sync skipped.{R}")
+    else:
+        new_found = {k: v for k, v in _result.items() if k not in positions}
+        if new_found:
+            positions.update(new_found)
+            save_cache(positions, _current_handle)
+            print(f"{YEL}Synced {len(new_found)} existing position(s) from account.{R}")
+        else:
+            print(f"{DIM}No untracked positions found.{R}")
+
     # Load or initialise profit tracking
     profit_data = load_profit()
     if user_changed and me["handle"] != "awa":
@@ -222,6 +313,7 @@ def run(positions: dict, api_key: str):
     prev_prices: dict[str, float] = {}
 
     session_spend = 0
+    run_count     = 0
 
     while True:
         if session_spend >= MAX_DAILY_SPEND:
@@ -345,43 +437,111 @@ def run(positions: dict, api_key: str):
         if not sold_any:
             print(f"  {DIM}Nothing to sell this round.{R}")
 
-        # ── Buy (silent) ───────────────────────────────────────────────────────
+        # ── Score and rank all candidates ──────────────────────────────────────
+        candidates = []
+        for m in markets:
+            if m["slug"] in positions: continue
+            outcomes = m["outcomes"]
+            if not outcomes: continue
+            total_q  = sum(o["q"] for o in outcomes)
+            winner   = max(outcomes, key=lambda o: o["price"])
+            close_ms = m.get("closeAt")
+
+            # Hard filters
+            if total_q < MIN_LIQUIDITY_Q: continue
+            if winner["price"] < WIN_THRESHOLD: continue
+            if winner["price"] > 0.95: continue          # profit margin too thin
+            if close_ms and close_ms / 1000 - time.time() < MIN_CLOSE_SECS: continue
+
+            s = score_market(winner, outcomes, prev_prices, close_ms)
+            candidates.append((s, m, winner))
+
+        candidates.sort(key=lambda x: x[0], reverse=True)
+
+        hdr("Top Markets")
+        if not candidates:
+            print(f"  {DIM}No qualifying markets this scan.{R}")
+        else:
+            for rank, (s, m, winner) in enumerate(candidates[:8], 1):
+                bar_w   = round(s * 10)
+                bar_str = GRN + "█" * bar_w + DIM + "░" * (10 - bar_w) + R
+                held    = "  ◆ held" if m["slug"] in positions else ""
+                print(f"  {BOLD}#{rank}{R} {bar_str} {s:.2f}  "
+                      f"{winner['price']*100:.1f}%  {m['title'][:44]}{DIM}{held}{R}")
+
+        # ── Buy top-ranked candidates ───────────────────────────────────────────
         trades_made = 0
+        slots = MAX_POSITIONS - len(positions)
 
-        if len(positions) < MAX_POSITIONS and session_spend < MAX_DAILY_SPEND:
-            for m in markets:
-                if m["slug"] in positions: continue
-                if len(positions) >= MAX_POSITIONS or session_spend >= MAX_DAILY_SPEND: break
+        for s, m, winner in candidates:
+            if slots <= 0 or session_spend >= MAX_DAILY_SPEND: break
+            cost = min(trade_cost(s), MAX_DAILY_SPEND - session_spend)
+            try:
+                result = client.trade(m["slug"], winner["id"],
+                                      max_cost=cost, yes_no="yes")
+                session_spend += result["costBarks"]
+                trades_made   += 1
+                slots         -= 1
+                pp_moved = (result["priceAfter"] - result["priceBefore"]) * 100
+                positions[m["slug"]] = {
+                    "outcome_id": winner["id"],
+                    "label":      winner["label"],
+                    "shares":     result["shares"],
+                    "buy_price":  result["priceAfter"],
+                    "yes_no":     "yes",
+                    "cost_spent": result["costBarks"],
+                    "buy_score":  s,
+                }
+                save_cache(positions, _current_handle)
+                print(f"\n  {GRN}✔ bought #{candidates.index((s,m,winner))+1}  {m['title']}  "
+                      f"{result['priceBefore']*100:.1f}%→{result['priceAfter']*100:.1f}% ({pp_moved:+.2f}pp){R}")
+            except Exception as e:
+                resp = getattr(e, "response", None)
+                body = getattr(resp, "text", str(e))
+                print(f"  {RED}✘ buy failed: {body}{R}")
 
-                outcomes = m["outcomes"]
-                total_q  = sum(o["q"] for o in outcomes)
-                winner   = max(outcomes, key=lambda o: o["price"])
+        # ── Top up existing positions whose score has risen ─────────────────────
+        for m in markets:
+            slug = m["slug"]
+            if slug not in positions: continue
+            pos = positions[slug]
+            if pos.get("closed"): continue
+            if pos.get("cost_spent", 0) >= MAX_POSITION_COST: continue
+            if session_spend >= MAX_DAILY_SPEND: break
 
-                if total_q < MIN_LIQUIDITY_Q: continue
-                if winner["price"] < WIN_THRESHOLD: continue
+            outcomes = m["outcomes"]
+            if not outcomes: continue
+            winner   = max(outcomes, key=lambda o: o["price"])
+            close_ms = m.get("closeAt")
 
-                s    = score_market(winner, outcomes, prev_prices)
-                cost = min(trade_cost(s), MAX_DAILY_SPEND - session_spend)
+            if winner["price"] < WIN_THRESHOLD or winner["price"] > 0.95: continue
+            if close_ms and close_ms / 1000 - time.time() < MIN_CLOSE_SECS: continue
 
-                try:
-                    result = client.trade(m["slug"], winner["id"],
-                                          max_cost=cost, yes_no="yes")
-                    session_spend += result["costBarks"]
-                    trades_made   += 1
-                    pp_moved = (result["priceAfter"] - result["priceBefore"]) * 100
-                    positions[m["slug"]] = {
-                        "outcome_id": winner["id"],
-                        "label":      winner["label"],
-                        "shares":     result["shares"],
-                        "buy_price":  result["priceAfter"],
-                        "yes_no":     "yes",
-                        "cost_spent": result["costBarks"],
-                    }
-                    save_cache(positions, _current_handle)
-                    print(f"\n  {GRN}✔ new position  {m['title']}  "
-                          f"{result['priceBefore']*100:.1f}%→{result['priceAfter']*100:.1f}% ({pp_moved:+.2f}pp){R}")
-                except Exception as e:
-                    pass  # silent on failure
+            cur_score  = score_market(winner, outcomes, prev_prices, close_ms)
+            entry_score = pos.get("buy_score", cur_score)
+
+            if cur_score < entry_score + SCORE_TOP_UP_DELTA: continue
+
+            headroom = MAX_POSITION_COST - pos.get("cost_spent", 0)
+            cost     = min(trade_cost(cur_score), headroom, MAX_DAILY_SPEND - session_spend)
+            if cost <= 0: continue
+
+            try:
+                result = client.trade(slug, pos["outcome_id"],
+                                      max_cost=cost, yes_no=pos["yes_no"])
+                session_spend          += result["costBarks"]
+                trades_made            += 1
+                pos["shares"]          += result["shares"]
+                pos["cost_spent"]      += result["costBarks"]
+                pos["buy_score"]        = cur_score
+                save_cache(positions, _current_handle)
+                pp_moved = (result["priceAfter"] - result["priceBefore"]) * 100
+                print(f"\n  {CYN}↑ topped up  {m['title']}  score {entry_score:.2f}→{cur_score:.2f}  "
+                      f"({pp_moved:+.2f}pp){R}")
+            except Exception as e:
+                resp = getattr(e, "response", None)
+                body = getattr(resp, "text", str(e))
+                print(f"  {RED}✘ top-up failed: {body}{R}")
 
         # Update momentum baseline for next scan
         for m in markets:
@@ -393,9 +553,11 @@ def run(positions: dict, api_key: str):
         profit      = current_bal - start_balance
         profit_data["last_profit"] = profit
         save_profit(profit_data)
+        run_count += 1
         col = GRN if profit >= 0 else RED
         print(f"\n{'─'*58}")
-        print(f"Holding {len(positions)}  |  "
+        print(f"Run #{run_count}  |  "
+              f"Holding {len(positions)}  |  "
               f"New buys: {trades_made}  |  "
               f"{BOLD}{col}Profit: {profit/1000:+.2f} Barks{R}  "
               f"Sleeping {SLEEP_SECONDS}s…")
