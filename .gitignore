@@ -1,4 +1,5 @@
 .borker_key
 positions.json
 profit.json
+config.json
 __pycache__/
