@@ -93,8 +93,6 @@ All sensitive files are encrypted with a custom substitution cipher before being
 | `positions.json` | Encrypted open positions + account handle |
 | `profit.json` | Encrypted profit tracking data |
 
-Switching users resets positions and profit. The user `awa` is exempt from profit resets.
-
 ---
 
 ## Files
