@@ -13,7 +13,12 @@ Philosophy
 5. Show a live portfolio summary every scan.
 """
 
-import getpass, time, json, os, signal, sys, socket, math, threading, select, termios, tty
+import getpass, time, json, os, signal, sys, socket, math, threading
+
+if os.name == 'nt':
+    import msvcrt
+else:
+    import select, termios, tty
 from datetime import datetime, timezone
 import requests as _req
 from typing import Optional
@@ -64,7 +69,7 @@ def fmt_closes(close_ms) -> str:
     now      = datetime.now(tz=timezone.utc)
     close_dt = datetime.fromtimestamp(close_ms / 1000, tz=timezone.utc).astimezone()
     secs     = (close_dt - now).total_seconds()
-    date_str = close_dt.strftime("%-d %b %I:%M %p")
+    date_str = close_dt.strftime("%#d %b %I:%M %p") if os.name == 'nt' else close_dt.strftime("%-d %b %I:%M %p")
     if secs <= 0:
         countdown = "closed"
     elif secs < 12 * 3600:
@@ -140,7 +145,8 @@ def load_api_key():
 def save_api_key(key: str):
     with open(KEY_FILE, "w") as f:
         json.dump({"key": _encrypt(key), "device": _encrypt(socket.gethostname())}, f)
-    os.chmod(KEY_FILE, 0o600)
+    if os.name != 'nt':
+        os.chmod(KEY_FILE, 0o600)
 
 # ── Scoring ────────────────────────────────────────────────────────────────────
 
@@ -274,16 +280,24 @@ def run(positions: dict, api_key: str):
     _t.start()
 
     print(f"{DIM}Scanning for existing positions… press any key to skip{R}", end="", flush=True)
-    _old_term = termios.tcgetattr(sys.stdin)
-    try:
-        tty.setraw(sys.stdin.fileno())
+    if os.name == 'nt':
         while _t.is_alive():
-            if select.select([sys.stdin], [], [], 0.2)[0]:
-                sys.stdin.read(1)
+            if msvcrt.kbhit():
+                msvcrt.getch()
                 _cancel.set()
                 break
-    finally:
-        termios.tcsetattr(sys.stdin, termios.TCSADRAIN, _old_term)
+            time.sleep(0.2)
+    else:
+        _old_term = termios.tcgetattr(sys.stdin)
+        try:
+            tty.setraw(sys.stdin.fileno())
+            while _t.is_alive():
+                if select.select([sys.stdin], [], [], 0.2)[0]:
+                    sys.stdin.read(1)
+                    _cancel.set()
+                    break
+        finally:
+            termios.tcsetattr(sys.stdin, termios.TCSADRAIN, _old_term)
 
     _t.join()
     print()  # newline after the prompt
@@ -578,6 +592,20 @@ if __name__ == "__main__":
                     os.remove(_f)
         _api_key = getpass.getpass("Enter your API key: ")
         save_api_key(_api_key)
+
+    while True:
+        try:
+            BorkerClient(_api_key).me()
+            break
+        except _req.HTTPError as e:
+            if e.response is not None and e.response.status_code == 401:
+                print(f"{RED}Invalid API key — clearing stored credentials.{R}")
+                if os.path.exists(KEY_FILE):
+                    os.remove(KEY_FILE)
+                _api_key = getpass.getpass("Enter your API key: ")
+                save_api_key(_api_key)
+            else:
+                raise
 
     _pos = {}
 
