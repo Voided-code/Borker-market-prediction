@@ -1,6 +1,6 @@
 # Borker Market Trader
 
-An automated trading bot for [borker.college](https://borker.college) markets.
+An automated trading bot for [borker.college](https://borker.college) markets. Works on macOS, Windows, and Linux.
 
 ---
 
@@ -10,12 +10,14 @@ On first run you will be prompted for your API key (input is hidden). The key is
 
 If you run on a different device, it detects the mismatch, wipes all local data (positions, profit, config), and prompts for the key again.
 
+On a brand new account the settings editor opens automatically before trading begins.
+
 ---
 
 ## Usage
 
 ```bash
-# Run the auto-trader
+# Run the auto-trader (sleep prevention is automatic on macOS and Windows)
 python3 trader.py
 
 # Sell all cached positions immediately
@@ -30,13 +32,23 @@ python3 main.py sell <slug> <outcome_id> <shares>
 python3 main.py no   <slug> <outcome_id> <max_cost>
 ```
 
+Requires Python 3.9+.
+
+---
+
+## Controls
+
+| Key | Action |
+|-----|--------|
+| **s** | Open settings editor (during sleep interval) |
+| **Esc** or **Ctrl+C** | Stop cleanly |
+| **Any other key** | Skip position sync on startup |
+
 ---
 
 ## Startup
 
-On every launch the trader scans the API for positions you already hold that aren't in the cache (useful if you traded manually). This runs in the background — **press any key to skip it** and go straight to trading.
-
-On a brand new account the settings editor opens automatically before trading begins.
+On every launch the trader scans all open markets in parallel to find positions you already hold that aren't in the local cache (useful after manual trades). A progress bar shows scan status — **press any key to skip** and jump straight to trading.
 
 ---
 
@@ -48,7 +60,7 @@ Every 60 seconds all open markets are fetched, filtered, and scored. A market mu
 
 | Filter | Value |
 |--------|-------|
-| Minimum pool size | 500,000 Barks |
+| Minimum pool size | 500 Barks |
 | Minimum winner price | 65% |
 | Maximum winner price | 95% (profit margin too thin above this) |
 | Minimum time to close | 2 hours |
@@ -62,17 +74,17 @@ Qualifying markets are ranked by a weighted score across six factors:
 | Pool dominance | 15% | Winner's share of total pool |
 | Liquidity | 15% | Log-scaled pool size above minimum |
 | Momentum | 10% | Price rising since last scan |
-| Time to close | 10% | Prefers 1–7 day window |
+| Time to close | 10% | 1–7 days = perfect; same day = lower; very long-dated = lower |
 
 The top-ranked markets fill open position slots. Spend per trade scales from 2 to 50 Barks based on score.
 
-### Rich mode
+### Scaled-up mode
 
-When your balance exceeds 300 Barks the bot enters rich mode. Spend per trade is boosted by the position's score (`cost × (1 + score)`), and top-ups trigger on any held position scoring ≥ 0.5 rather than requiring a score rise.
+When your balance exceeds `FORCE_ABOVE` (default: 300 Barks) the bot uses larger trade sizes. Spend per trade is boosted by the position's score (`cost × (1 + score)`), and top-ups trigger on any held position scoring ≥ 0.5 rather than requiring a score rise.
 
 ### Top-ups
 
-If a held position's score rises **+0.15** above its entry score (normal mode), or scores ≥ 0.5 (rich mode), the bot buys more into that position. Total spend per position is capped at 50,000 mBarks.
+If a held position's score rises **+0.15** above its entry score (normal mode), or scores ≥ 0.5 (scaled-up mode), the bot buys more into that position. Total spend per position is capped at 50 Barks.
 
 ### Exit
 
@@ -88,13 +100,13 @@ Each held position is checked every scan and sold when any condition triggers:
 ### Limits
 
 - Max 10 open positions at once
-- Max 100,000 mBarks spent per session
+- Max 100 Barks spent per day — resets at midnight; buys pause at the limit but sells continue
 
 ---
 
 ## Settings
 
-Press **`s`** during the sleep interval to open the settings editor. Settings are also shown automatically on first run for a new account.
+Press **`s`** during the sleep interval to open the settings editor.
 
 For each field the editor shows:
 
@@ -105,9 +117,9 @@ For each field the editor shows:
 
 - **Enter** — keep the current value
 - **`r`** — reset to the built-in default
-- **Any number** — set a new value
+- **Any number** — set a new value (percentages entered as e.g. `65`, stored as `0.65`)
 
-All settings are saved encrypted to `config.json` when you exit the editor. They are restored on next launch. Switching device or user resets all settings back to defaults.
+All settings are saved encrypted to `config.json` when you exit the editor and restored on next launch. Switching device or user resets all settings to defaults.
 
 | Setting | Default | Description |
 |---------|---------|-------------|
@@ -119,11 +131,23 @@ All settings are saved encrypted to `config.json` when you exit the editor. They
 | MAX_POSITIONS | 10 | Max concurrent holdings |
 | MIN_LIQUIDITY_Q | 500 Barks | Minimum pool size |
 | MIN_COST | 2 Barks | Min spend per trade |
-| MAX_COST | 50 Barks | Max spend per trade |
-| MAX_POSITION_COST | 50,000 mBarks | Max total spend per position |
-| MAX_DAILY_SPEND | 100,000 mBarks | Session spend cap |
+| MAX_COST | 50 Barks | Max spend per trade (score-scaled) |
+| MAX_POSITION_COST | 50 Barks | Max total spend per position |
+| MAX_DAILY_SPEND | 100 Barks | Daily spend cap |
+| FORCE_ABOVE | 300 Barks | Balance above which scaled-up trade sizing kicks in |
 | SCORE_TOP_UP_DELTA | 0.15 | Score rise needed to top up (normal mode) |
 | SLEEP_SECONDS | 60s | Scan interval |
+
+---
+
+## Footer
+
+The footer shown after each scan:
+
+- **Daily spend** — Barks spent today vs the daily cap (turns red at limit)
+- **Run / Holding / New buys** — scan count, open positions, trades this run
+- **3d Profit** — change in total portfolio value (balance + invested) over the last 3 days
+- **Active markets** — total Barks currently committed to open positions
 
 ---
 
@@ -133,9 +157,9 @@ All sensitive files are encrypted with a custom substitution cipher before being
 
 | File | Contents |
 |------|----------|
-| `.borker_key` | Encrypted API key + encrypted device name (chmod 600) |
+| `.borker_key` | Encrypted API key + encrypted device name (chmod 600 on Unix) |
 | `positions.json` | Encrypted open positions + account handle |
-| `profit.json` | Encrypted profit tracking data |
+| `profit.json` | Encrypted profit tracking + daily portfolio snapshots |
 | `config.json` | Encrypted settings |
 
 ---
@@ -144,9 +168,10 @@ All sensitive files are encrypted with a custom substitution cipher before being
 
 | File | Purpose |
 |------|---------|
-| `main.py` | API client + manual CLI |
 | `trader.py` | Automated trading bot |
-| `.borker_key` | Stored credentials (auto-managed, gitignored) |
-| `positions.json` | Open positions cache (auto-managed, gitignored) |
-| `profit.json` | Profit tracking across sessions (auto-managed, gitignored) |
-| `config.json` | Saved settings (auto-managed, gitignored) |
+| `main.py` | API client + manual CLI |
+| `cache/` | Auto-managed data folder (gitignored) |
+| `cache/.borker_key` | Encrypted API key + device binding |
+| `cache/positions.json` | Open positions |
+| `cache/profit.json` | Profit tracking + daily snapshots |
+| `cache/config.json` | Saved settings |

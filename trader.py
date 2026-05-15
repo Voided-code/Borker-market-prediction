@@ -1,4 +1,4 @@
-import getpass, time, json, os, signal, sys, socket, math, threading
+import getpass, time, json, os, signal, sys, socket, math, threading, subprocess
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 if os.name == 'nt':
@@ -26,11 +26,29 @@ MAX_DAILY_SPEND    = 100  # max daily spend (Barks)
 SCORE_TOP_UP_DELTA = 0.15    # top up if score rises this much above entry score
 MAX_POSITION_COST  = 50   # max total spend on a single position (Barks)
 FORCE_ABOVE     = 300  # above this balance, use scaled-up trade sizing (Barks)
+AUTO_SYNC       = True # scan for untracked positions on startup
 
-CACHE_FILE  = os.path.join(os.path.dirname(__file__), "positions.json")
-KEY_FILE    = os.path.join(os.path.dirname(__file__), ".borker_key")
-CONFIG_FILE = os.path.join(os.path.dirname(__file__), "config.json")
+_DIR        = os.path.dirname(__file__)
+CACHE_DIR   = os.path.join(_DIR, "cache")
+CACHE_FILE  = os.path.join(CACHE_DIR, "positions.json")
+KEY_FILE    = os.path.join(CACHE_DIR, ".borker_key")
+CONFIG_FILE = os.path.join(CACHE_DIR, "config.json")
+PROFIT_FILE = os.path.join(CACHE_DIR, "profit.json")
+os.makedirs(CACHE_DIR, exist_ok=True)
+
+# Migrate files from root to cache/ on first run with new layout
+for _old, _new in [
+    (os.path.join(_DIR, "positions.json"), CACHE_FILE),
+    (os.path.join(_DIR, ".borker_key"),    KEY_FILE),
+    (os.path.join(_DIR, "config.json"),    CONFIG_FILE),
+    (os.path.join(_DIR, "profit.json"),    PROFIT_FILE),
+]:
+    if os.path.exists(_old) and not os.path.exists(_new):
+        os.rename(_old, _new)
+
 _current_handle = None
+_caff_proc  = None
+_sleep_active = False
 
 _DEFAULTS = {
     "WIN_THRESHOLD":    0.65,
@@ -47,6 +65,7 @@ _DEFAULTS = {
     "SCORE_TOP_UP_DELTA":0.15,
     "SLEEP_SECONDS":    60,
     "FORCE_ABOVE":   300,
+    "AUTO_SYNC":     True,
 }
 
 # ── Colours ────────────────────────────────────────────────────────────────────
@@ -54,6 +73,28 @@ _DEFAULTS = {
 R = "\033[0m"
 BOLD = "\033[1m"; DIM = "\033[2m"
 GRN = "\033[92m"; YEL = "\033[93m"; RED = "\033[91m"; CYN = "\033[96m"
+
+def _toggle_sleep():
+    global _caff_proc, _sleep_active
+    if os.name == 'nt':
+        if _sleep_active:
+            ctypes.windll.kernel32.SetThreadExecutionState(0x80000000)  # reset — allow sleep
+            _sleep_active = False
+        else:
+            ctypes.windll.kernel32.SetThreadExecutionState(0x80000001)  # prevent sleep
+            _sleep_active = True
+    elif sys.platform == 'darwin':
+        if _sleep_active:
+            if _caff_proc:
+                _caff_proc.terminate()
+                _caff_proc = None
+            _sleep_active = False
+        else:
+            _caff_proc = subprocess.Popen(
+                ['caffeinate', '-i'],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            )
+            _sleep_active = True
 
 def clear_screen():
     print("\n" * 100, end="")
@@ -117,7 +158,7 @@ def _apply_config(cfg: dict):
     global WIN_THRESHOLD, PRICE_SWEET_MAX, FLIP_THRESHOLD, TAKE_PROFIT_PP, \
            STOP_LOSS_PP, MAX_POSITIONS, MIN_LIQUIDITY_Q, MIN_COST, MAX_COST, \
            MAX_POSITION_COST, MAX_DAILY_SPEND, SCORE_TOP_UP_DELTA, SLEEP_SECONDS, \
-           FORCE_ABOVE
+           FORCE_ABOVE, AUTO_SYNC
     for k, v in cfg.items():
         if   k == "WIN_THRESHOLD":    WIN_THRESHOLD    = float(v)
         elif k == "PRICE_SWEET_MAX":  PRICE_SWEET_MAX  = float(v)
@@ -132,7 +173,8 @@ def _apply_config(cfg: dict):
         elif k == "MAX_DAILY_SPEND":  MAX_DAILY_SPEND  = float(v)
         elif k == "SCORE_TOP_UP_DELTA":SCORE_TOP_UP_DELTA = float(v)
         elif k == "SLEEP_SECONDS":    SLEEP_SECONDS    = int(v)
-        elif k == "FORCE_ABOVE":   FORCE_ABOVE   = float(v)
+        elif k == "FORCE_ABOVE":      FORCE_ABOVE      = float(v)
+        elif k == "AUTO_SYNC":        AUTO_SYNC        = bool(v)
 
 def load_config():
     if not os.path.exists(CONFIG_FILE):
@@ -170,6 +212,7 @@ def save_config():
         "SCORE_TOP_UP_DELTA":SCORE_TOP_UP_DELTA,
         "SLEEP_SECONDS":    SLEEP_SECONDS,
         "FORCE_ABOVE":   FORCE_ABOVE,
+        "AUTO_SYNC":     AUTO_SYNC,
     })
 
 # ── Encryption ────────────────────────────────────────────────────────────────
@@ -278,9 +321,22 @@ def edit_settings():
     global WIN_THRESHOLD, PRICE_SWEET_MAX, FLIP_THRESHOLD, TAKE_PROFIT_PP, \
            STOP_LOSS_PP, MAX_POSITIONS, MIN_LIQUIDITY_Q, MIN_COST, MAX_COST, \
            MAX_POSITION_COST, MAX_DAILY_SPEND, SCORE_TOP_UP_DELTA, SLEEP_SECONDS, \
-           FORCE_ABOVE
+           FORCE_ABOVE, AUTO_SYNC
+
+    _orig = {
+        "AUTO_SYNC": AUTO_SYNC, "WIN_THRESHOLD": WIN_THRESHOLD,
+        "PRICE_SWEET_MAX": PRICE_SWEET_MAX, "FLIP_THRESHOLD": FLIP_THRESHOLD,
+        "TAKE_PROFIT_PP": TAKE_PROFIT_PP, "STOP_LOSS_PP": STOP_LOSS_PP,
+        "MAX_POSITIONS": MAX_POSITIONS, "MIN_LIQUIDITY_Q": MIN_LIQUIDITY_Q,
+        "MIN_COST": MIN_COST, "MAX_COST": MAX_COST,
+        "MAX_POSITION_COST": MAX_POSITION_COST, "MAX_DAILY_SPEND": MAX_DAILY_SPEND,
+        "SCORE_TOP_UP_DELTA": SCORE_TOP_UP_DELTA, "SLEEP_SECONDS": SLEEP_SECONDS,
+        "FORCE_ABOVE": FORCE_ABOVE,
+    }
+    _cancelled = False
 
     fields = [
+        ("AUTO_SYNC",          AUTO_SYNC,            "bool"),
         ("WIN_THRESHOLD",      WIN_THRESHOLD,        "pct"),
         ("PRICE_SWEET_MAX",    PRICE_SWEET_MAX,      "pct"),
         ("FLIP_THRESHOLD",     FLIP_THRESHOLD,       "pct"),
@@ -302,6 +358,8 @@ def edit_settings():
     for name, current, kind in fields:
         if kind == "pct":
             display = f"{current*100:.1f}%"
+        elif kind == "bool":
+            display = "on" if current else "off"
         elif kind == "liq":
             display = f"{current:.0f}"
         else:
@@ -309,9 +367,17 @@ def edit_settings():
 
         print(f"  {BOLD}{name}{R}  current = {CYN}{display}{R}")
         try:
-            raw = input(f"  {DIM}[r to reset, Enter to skip]:{R} ").strip()
+            if kind == "bool":
+                raw = input(f"  {DIM}[on/off, r to reset, Enter to skip]:{R} ").strip()
+            else:
+                raw = input(f"  {DIM}[r to reset, Enter to skip]:{R} ").strip()
         except (EOFError, KeyboardInterrupt):
             print()
+            _cancelled = True
+            break
+
+        if raw and raw[0] == '\x1b':
+            _cancelled = True
             break
 
         if not raw:
@@ -321,6 +387,15 @@ def edit_settings():
 
         if raw.lower() == "r":
             val = _DEFAULTS[name]
+        elif kind == "bool":
+            if raw.lower() in ("on", "1", "yes", "true"):
+                val = True
+            elif raw.lower() in ("off", "0", "no", "false"):
+                val = False
+            else:
+                print(f"  {RED}✘ enter on or off{R}")
+                print()
+                continue
         else:
             try:
                 val = float(raw)
@@ -331,7 +406,8 @@ def edit_settings():
                 print()
                 continue
 
-        if   name == "WIN_THRESHOLD":    WIN_THRESHOLD    = val
+        if   name == "AUTO_SYNC":        AUTO_SYNC        = val
+        elif name == "WIN_THRESHOLD":    WIN_THRESHOLD    = val
         elif name == "PRICE_SWEET_MAX":  PRICE_SWEET_MAX  = val
         elif name == "FLIP_THRESHOLD":   FLIP_THRESHOLD   = val
         elif name == "TAKE_PROFIT_PP":   TAKE_PROFIT_PP   = val
@@ -344,16 +420,29 @@ def edit_settings():
         elif name == "MAX_DAILY_SPEND":  MAX_DAILY_SPEND  = val
         elif name == "SCORE_TOP_UP_DELTA":SCORE_TOP_UP_DELTA = val
         elif name == "SLEEP_SECONDS":    SLEEP_SECONDS    = int(val)
-        elif name == "FORCE_ABOVE":   FORCE_ABOVE   = val
+        elif name == "FORCE_ABOVE":      FORCE_ABOVE      = val
+
+        if kind == "pct":
+            new_display = f"{val*100:.1f}%"
+        elif kind == "bool":
+            new_display = "on" if val else "off"
+        elif kind == "int":
+            new_display = str(int(val))
+        else:
+            new_display = str(val)
 
         if raw.lower() == "r":
-            print(f"  {YEL}↺ {name} reset to default{R}")
+            print(f"  {YEL}↺ {name} reset to {new_display}{R}")
         else:
-            print(f"  {GRN}✔ {name} updated{R}")
+            print(f"  {GRN}✔ {name} → {new_display}{R}")
         print()
 
-    save_config()
-    print(f"\n{BOLD}{'─'*58}{R}\n")
+    if _cancelled:
+        _apply_config(_orig)
+        print(f"\n{DIM}Settings cancelled — no changes saved.{R}\n")
+    else:
+        save_config()
+        print(f"\n{BOLD}{'─'*58}{R}\n")
 
 # ── Position discovery ─────────────────────────────────────────────────────────
 
@@ -407,7 +496,6 @@ def discover_positions(markets: list, api_key: str, cancel=None, progress=None,
 
 # ── Main ───────────────────────────────────────────────────────────────────────
 
-PROFIT_FILE = os.path.join(os.path.dirname(__file__), "profit.json")
 
 def load_profit() -> dict:
     if os.path.exists(PROFIT_FILE):
@@ -431,75 +519,78 @@ def run(positions: dict, api_key: str):
     cached_user, cached_pos = load_cache()
     user_changed = bool(cached_user and cached_user != me["handle"])
     if user_changed:
-        print(f"{YEL}Different user detected ({cached_user} → {me['handle']}) — resetting cache.{R}")
+        print(f"{YEL}Different user detected ({cached_user} → {me['handle']}) — resetting all cache.{R}")
         reset_config()
     else:
         positions.update(cached_pos)
 
     # Sync positions — runs in background, press any key to skip
-    _cancel      = threading.Event()
-    _result      = {}
-    _all_mkts    = client.list_markets("open")
-    _known_slugs = set(positions.keys())
-    _to_check    = max(len(_all_mkts) - len(_known_slugs), 1)
-    _progress    = [0, _to_check]
-
-    def _sync():
-        try:
-            _result.update(discover_positions(_all_mkts, api_key, _cancel, _progress, _known_slugs))
-        except Exception:
-            pass
-
-    def _draw_sync_bar():
-        cur, total = _progress
-        w = 28
-        filled = round(cur / total * w)
-        bar_str = GRN + "█" * filled + DIM + "░" * (w - filled) + R
-        print(f"\r  {DIM}Syncing positions{R} {bar_str} {CYN}{cur}/{total}{R}  {DIM}[any key to skip]{R}   ",
-              end="", flush=True)
-
-    _t = threading.Thread(target=_sync, daemon=True)
-    _t.start()
-
-    if os.name == 'nt':
-        while _t.is_alive():
-            _draw_sync_bar()
-            if msvcrt.kbhit():
-                ch = msvcrt.getwch()
-                _cancel.set()
-                if ch in ('\x1b', '\x03'):
-                    raise KeyboardInterrupt
-                break
-            time.sleep(0.2)
+    if not AUTO_SYNC:
+        print(f"{DIM}Auto sync disabled.{R}")
     else:
-        _old_term = termios.tcgetattr(sys.stdin)
-        try:
-            tty.setraw(sys.stdin.fileno())
+        _cancel      = threading.Event()
+        _result      = {}
+        _all_mkts    = client.list_markets("open")
+        _known_slugs = set(positions.keys())
+        _to_check    = max(len(_all_mkts) - len(_known_slugs), 1)
+        _progress    = [0, _to_check]
+
+        def _sync():
+            try:
+                _result.update(discover_positions(_all_mkts, api_key, _cancel, _progress, _known_slugs))
+            except Exception:
+                pass
+
+        def _draw_sync_bar():
+            cur, total = _progress
+            w = 28
+            filled = round(cur / total * w)
+            bar_str = GRN + "█" * filled + DIM + "░" * (w - filled) + R
+            print(f"\r  {DIM}Syncing positions{R} {bar_str} {CYN}{cur}/{total}{R}  {DIM}[any key to skip]{R}   ",
+                  end="", flush=True)
+
+        _t = threading.Thread(target=_sync, daemon=True)
+        _t.start()
+
+        if os.name == 'nt':
             while _t.is_alive():
                 _draw_sync_bar()
-                if select.select([sys.stdin], [], [], 0.2)[0]:
-                    ch = sys.stdin.read(1)
+                if msvcrt.kbhit():
+                    ch = msvcrt.getwch()
                     _cancel.set()
                     if ch in ('\x1b', '\x03'):
                         raise KeyboardInterrupt
                     break
-        finally:
-            termios.tcsetattr(sys.stdin, termios.TCSADRAIN, _old_term)
-
-    _draw_sync_bar()  # ensure final state is shown
-    _t.join(timeout=1.0 if _cancel.is_set() else None)
-    print()  # newline after the progress bar
-
-    if _cancel.is_set():
-        print(f"{DIM}Position sync skipped.{R}")
-    else:
-        new_found = {k: v for k, v in _result.items() if k not in positions}
-        if new_found:
-            positions.update(new_found)
-            save_cache(positions, _current_handle)
-            print(f"{YEL}Synced {len(new_found)} existing position(s) from account.{R}")
+                time.sleep(0.2)
         else:
-            print(f"{DIM}No untracked positions found.{R}")
+            _old_term = termios.tcgetattr(sys.stdin)
+            try:
+                tty.setraw(sys.stdin.fileno())
+                while _t.is_alive():
+                    _draw_sync_bar()
+                    if select.select([sys.stdin], [], [], 0.2)[0]:
+                        ch = sys.stdin.read(1)
+                        _cancel.set()
+                        if ch in ('\x1b', '\x03'):
+                            raise KeyboardInterrupt
+                        break
+            finally:
+                termios.tcsetattr(sys.stdin, termios.TCSADRAIN, _old_term)
+
+        _draw_sync_bar()  # ensure final state is shown
+        _t.join(timeout=1.0 if _cancel.is_set() else None)
+        print()  # newline after the progress bar
+
+        if _cancel.is_set():
+            print(f"{DIM}Position sync skipped.{R}")
+        else:
+            new_found = {k: v for k, v in _result.items() if k not in positions}
+            if new_found:
+                positions.update(new_found)
+                save_cache(positions, _current_handle)
+                print(f"{YEL}Synced {len(new_found)} existing position(s) from account.{R}")
+            else:
+                print(f"{DIM}No untracked positions found.{R}")
 
     # Load or initialise profit tracking
     profit_data = load_profit()
@@ -670,8 +761,8 @@ def run(positions: dict, api_key: str):
 
         # ── Score and rank all candidates ──────────────────────────────────────
         candidates = []
+        all_scored = []   # includes held markets — for top-picks display
         for m in markets:
-            if m["slug"] in positions: continue
             outcomes = m["outcomes"]
             if not outcomes: continue
             total_q  = sum(o["q"] for o in outcomes)
@@ -681,13 +772,16 @@ def run(positions: dict, api_key: str):
             # Hard filters
             if total_q / 1000 < MIN_LIQUIDITY_Q: continue
             if winner["price"] < WIN_THRESHOLD: continue
-            if winner["price"] > 0.95: continue          # profit margin too thin
+            if winner["price"] > 0.95: continue
             if close_ms and close_ms / 1000 - time.time() < MIN_CLOSE_SECS: continue
 
             s = score_market(winner, outcomes, prev_prices, close_ms)
-            candidates.append((s, m, winner))
+            all_scored.append((s, m, winner))
+            if m["slug"] not in positions:
+                candidates.append((s, m, winner))
 
         candidates.sort(key=lambda x: x[0], reverse=True)
+        all_scored.sort(key=lambda x: x[0], reverse=True)
 
         hdr("Top Markets")
         if not candidates:
@@ -794,7 +888,7 @@ def run(positions: dict, api_key: str):
         # Profit summary
         total_invested = sum(p.get("cost_spent", 0) for p in positions.values() if not p.get("closed"))
         current_bal    = client.me()["balanceBarks"] / 1000
-        portfolio_val  = current_bal + total_invested
+        portfolio_val  = current_bal
 
         # Record daily snapshot for 3-day profit tracking
         snapshots = profit_data.setdefault("daily_snapshots", {})
@@ -817,6 +911,19 @@ def run(positions: dict, api_key: str):
         run_count += 1
         col       = GRN if profit_3d >= 0 else RED
         spend_col = RED if session_spend >= MAX_DAILY_SPEND else YEL
+
+        # Top 3 markets — pinned above footer so they're visible during sleep
+        print(f"\n{BOLD}  Top picks{R}")
+        if all_scored:
+            for rank, (s, m, winner) in enumerate(all_scored[:3], 1):
+                bar_w   = round(s * 10)
+                bar_str = GRN + "█" * bar_w + DIM + "░" * (10 - bar_w) + R
+                held    = f" {CYN}◆ Held{R}" if m["slug"] in positions else ""
+                print(f"  {DIM}#{rank}{R} {bar_str} {BOLD}{winner['price']*100:.1f}%{R}  "
+                      f"{m['title'][:44]}{held}")
+        else:
+            print(f"  {DIM}No qualifying markets.{R}")
+
         print(f"\n{'─'*58}")
         print(f"  {DIM}Daily spend:{R} {spend_col}{BOLD}{session_spend:,.2f} / {MAX_DAILY_SPEND:,.0f} Barks{R}")
         if session_spend >= MAX_DAILY_SPEND:
@@ -826,17 +933,27 @@ def run(positions: dict, api_key: str):
               f"New buys: {trades_made}  |  "
               f"{BOLD}{col}3d Profit: {profit_3d:+.2f} Barks{R}  |  "
               f"{CYN}{BOLD}Active markets: {total_invested:.2f} Barks{R}")
-        print(f"{DIM}  Sleeping {SLEEP_SECONDS}s…  [s] settings  [Esc] stop{R}")
+        t_col = YEL if _sleep_active else DIM
+        print(f"\n{DIM}  Sleeping {SLEEP_SECONDS}s…  [s] settings  {t_col}[t] keep awake{R}{DIM}  [Esc] stop{R}")
 
-        # Sleep, but watch for 's' (settings) or Esc/Ctrl-C (stop)
+        def _reprint_footer():
+            t_col = YEL if _sleep_active else DIM
+            line = f"{DIM}  Sleeping {SLEEP_SECONDS}s…  [s] settings  {t_col}[t] keep awake{R}{DIM}  [Esc] stop{R}"
+            print(f"\033[A\r\033[K{line}", flush=True)
+
+        # Sleep, but watch for 's' (settings), 't' (sleep toggle), or Esc/Ctrl-C (stop)
         if os.name == 'nt':
             deadline = time.time() + SLEEP_SECONDS
             while time.time() < deadline:
                 if msvcrt.kbhit():
                     ch = msvcrt.getwch()
                     if ch.lower() == "s":
+                        clear_screen()
                         edit_settings()
                         break
+                    elif ch.lower() == "t":
+                        _toggle_sleep()
+                        _reprint_footer()
                     elif ch in ('\x1b', '\x03'):
                         raise KeyboardInterrupt
                 time.sleep(0.2)
@@ -850,9 +967,13 @@ def run(positions: dict, api_key: str):
                         ch = sys.stdin.read(1)
                         if ch.lower() == "s":
                             termios.tcsetattr(sys.stdin, termios.TCSADRAIN, _old)
+                            clear_screen()
                             edit_settings()
                             tty.setraw(sys.stdin.fileno())
                             break
+                        elif ch.lower() == "t":
+                            _toggle_sleep()
+                            _reprint_footer()
                         elif ch in ('\x1b', '\x03'):
                             raise KeyboardInterrupt
             finally:
@@ -913,7 +1034,7 @@ if __name__ == "__main__":
         _api_key = _stored_key
     else:
         if _stored_device and _stored_device != _this_device:
-            print(f"{YEL}New device detected — resetting and re-authenticating.{R}")
+            print(f"{YEL}New device detected — resetting all cache and re-authenticating.{R}")
             for _f in (CACHE_FILE, PROFIT_FILE, CONFIG_FILE):
                 if os.path.exists(_f):
                     os.remove(_f)
@@ -942,7 +1063,13 @@ if __name__ == "__main__":
 
     _pos = {}
 
+    # Prevent the device from sleeping while the trader runs
+    _toggle_sleep()  # starts active by default
+
     def _shutdown(*_):
+        global _sleep_active
+        if _sleep_active:
+            _toggle_sleep()
         save_cache(_pos, _current_handle)
         print(f"\n{YEL}Stopped — positions saved.{R}")
         sys.exit(0)
