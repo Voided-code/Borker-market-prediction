@@ -21,7 +21,7 @@ MIN_LIQUIDITY_Q = 500     # skip thin markets (Barks)
 TAKE_PROFIT_PP  = 12      # sell when up this many pp from entry
 STOP_LOSS_PP    = 10      # sell when down this many pp from entry
 FLIP_THRESHOLD  = 0.55    # sell if our side drops below this (market flipped)
-SLEEP_SECONDS      = 60
+SLEEP_SECONDS      = 60     # seconds to wait between scans (can be set to 0 for no delay, but not recommended)
 MAX_DAILY_SPEND    = 100  # max daily spend (Barks)
 SCORE_TOP_UP_DELTA = 0.15    # top up if score rises this much above entry score
 MAX_POSITION_COST  = 50   # max total spend on a single position (Barks)
@@ -318,12 +318,31 @@ def trade_cost(s: float) -> int:
     return round(MIN_COST + s * (MAX_COST - MIN_COST))
 
 def edit_settings():
-    global WIN_THRESHOLD, PRICE_SWEET_MAX, FLIP_THRESHOLD, TAKE_PROFIT_PP, \
-           STOP_LOSS_PP, MAX_POSITIONS, MIN_LIQUIDITY_Q, MIN_COST, MAX_COST, \
-           MAX_POSITION_COST, MAX_DAILY_SPEND, SCORE_TOP_UP_DELTA, SLEEP_SECONDS, \
-           FORCE_ABOVE, AUTO_SYNC
+    _important = [
+        ("AUTO_SYNC",       "bool"),
+        ("MAX_DAILY_SPEND", "float"),
+        ("MAX_POSITIONS",   "int"),
+        ("MAX_COST",        "float"),
+        ("MIN_COST",        "float"),
+        ("WIN_THRESHOLD",   "pct"),
+        ("FORCE_ABOVE",     "float"),
+        ("SLEEP_SECONDS",   "int"),
+    ]
+    _other = [
+        ("PRICE_SWEET_MAX",    "pct"),
+        ("FLIP_THRESHOLD",     "pct"),
+        ("TAKE_PROFIT_PP",     "float"),
+        ("STOP_LOSS_PP",       "float"),
+        ("MIN_LIQUIDITY_Q",    "float"),
+        ("MAX_POSITION_COST",  "float"),
+        ("SCORE_TOP_UP_DELTA", "float"),
+    ]
+    DISPLAY   = {"FORCE_ABOVE": "min barks owned"}
+    ACTIONS   = ["Save & Exit", "Exit", "Reset & Exit"]
+    OTHER_IDX = len(_important)          # index of the "Other Settings" row
+    n_items   = OTHER_IDX + 1 + len(ACTIONS)
 
-    _orig = {
+    vals = {
         "AUTO_SYNC": AUTO_SYNC, "WIN_THRESHOLD": WIN_THRESHOLD,
         "PRICE_SWEET_MAX": PRICE_SWEET_MAX, "FLIP_THRESHOLD": FLIP_THRESHOLD,
         "TAKE_PROFIT_PP": TAKE_PROFIT_PP, "STOP_LOSS_PP": STOP_LOSS_PP,
@@ -333,116 +352,233 @@ def edit_settings():
         "SCORE_TOP_UP_DELTA": SCORE_TOP_UP_DELTA, "SLEEP_SECONDS": SLEEP_SECONDS,
         "FORCE_ABOVE": FORCE_ABOVE,
     }
-    _cancelled = False
+    _orig = dict(vals)
+    selected = 0
 
-    fields = [
-        ("AUTO_SYNC",          AUTO_SYNC,            "bool"),
-        ("WIN_THRESHOLD",      WIN_THRESHOLD,        "pct"),
-        ("PRICE_SWEET_MAX",    PRICE_SWEET_MAX,      "pct"),
-        ("FLIP_THRESHOLD",     FLIP_THRESHOLD,       "pct"),
-        ("TAKE_PROFIT_PP",     TAKE_PROFIT_PP,       "float"),
-        ("STOP_LOSS_PP",       STOP_LOSS_PP,         "float"),
-        ("MAX_POSITIONS",      MAX_POSITIONS,        "int"),
-        ("MIN_LIQUIDITY_Q",    MIN_LIQUIDITY_Q,      "float"),
-        ("MIN_COST",           MIN_COST,             "float"),
-        ("MAX_COST",           MAX_COST,             "float"),
-        ("MAX_POSITION_COST",  MAX_POSITION_COST,    "float"),
-        ("MAX_DAILY_SPEND",    MAX_DAILY_SPEND,      "float"),
-        ("FORCE_ABOVE",     FORCE_ABOVE,       "float"),
-        ("SCORE_TOP_UP_DELTA", SCORE_TOP_UP_DELTA,   "float"),
-        ("SLEEP_SECONDS",      SLEEP_SECONDS,        "int"),
-    ]
+    def fmt(name, kind):
+        v = vals[name]
+        if kind == "pct":  return f"{v*100:.1f}%"
+        if kind == "bool": return "on" if v else "off"
+        if kind == "int":  return str(int(v))
+        return str(v)
 
-    print(f"\n{BOLD}── Settings {'─'*46}{R}\n")
+    def p(s=""):
+        sys.stdout.write(s + "\r\n")
+        sys.stdout.flush()
 
-    for name, current, kind in fields:
-        if kind == "pct":
-            display = f"{current*100:.1f}%"
-        elif kind == "bool":
-            display = "on" if current else "off"
-        elif kind == "liq":
-            display = f"{current:.0f}"
+    def draw():
+        clear_screen()
+        p()
+        p(f"{BOLD}── Settings {'─'*46}{R}")
+        p()
+        for i, (name, kind) in enumerate(_important):
+            label   = DISPLAY.get(name, name)
+            v       = fmt(name, kind)
+            changed = vals[name] != _orig[name]
+            val_col = YEL if changed else ""
+            if i == selected:
+                p(f"  {CYN}{BOLD}→ {label:<22}{val_col}{v}{R}")
+            else:
+                p(f"    {DIM}{label:<22}{R}{val_col}{v}{R}")
+        other_changed = any(vals[n] != _orig[n] for n, _ in _other)
+        other_col = YEL if other_changed else DIM
+        if OTHER_IDX == selected:
+            p(f"  {CYN}{BOLD}→ Other Settings {'─'*3}►{R}")
         else:
-            display = str(current)
+            p(f"    {other_col}Other Settings {'─'*3}►{R}")
+        p()
+        p(f"  {'─'*54}")
+        p()
+        for j, action in enumerate(ACTIONS):
+            idx = OTHER_IDX + 1 + j
+            if idx == selected:
+                p(f"  {CYN}{BOLD}→ {action}{R}")
+            else:
+                p(f"    {DIM}{action}{R}")
+        p()
+        p(f"  {DIM}[↑↓ / k i] navigate  [Enter] select  [Esc] cancel{R}")
 
-        print(f"  {BOLD}{name}{R}  current = {CYN}{display}{R}")
+    def read_key():
+        if os.name == 'nt':
+            ch = msvcrt.getwch()
+            if ch == '\xe0':
+                ch2 = msvcrt.getwch()
+                if ch2 == 'H': return 'UP'
+                if ch2 == 'P': return 'DOWN'
+                return ''
+            if ch in ('\r', '\n'): return 'ENTER'
+            if ch == '\x1b':       return 'ESC'
+            if ch == '\x03':       return 'CTRL_C'
+            return ch
+        else:
+            fd = sys.stdin.fileno()
+            ch = os.read(fd, 1)
+            if ch == b'\x1b':
+                if select.select([sys.stdin], [], [], 0.02)[0]:
+                    rest = os.read(fd, 2)
+                    if rest == b'[A': return 'UP'
+                    if rest == b'[B': return 'DOWN'
+                return 'ESC'
+            if ch in (b'\r', b'\n'): return 'ENTER'
+            if ch == b'\x03':        return 'CTRL_C'
+            return ch.decode('utf-8', errors='replace')
+
+    def cooked():
+        if os.name != 'nt':
+            termios.tcsetattr(sys.stdin, termios.TCSADRAIN, _old_term)
+
+    def raw():
+        if os.name != 'nt':
+            tty.setraw(sys.stdin.fileno())
+
+    def edit_field(name, kind):
+        cooked()
+        clear_screen()
+        v = vals[name]
+        if kind == "pct":   display, hint = f"{v*100:.1f}%", "enter %, e.g. 65"
+        elif kind == "bool": display, hint = ("on" if v else "off"), "on / off"
+        elif kind == "int":  display, hint = str(int(v)), "integer"
+        else:                display, hint = str(v), "number"
+        print(f"\n  {BOLD}{DISPLAY.get(name, name)}{R}  current = {CYN}{display}{R}")
         try:
-            if kind == "bool":
-                raw = input(f"  {DIM}[on/off, r to reset, Enter to skip]:{R} ").strip()
-            else:
-                raw = input(f"  {DIM}[r to reset, Enter to skip]:{R} ").strip()
+            user_in = input(f"  {DIM}[{hint}, r to reset, Enter to keep]:{R} ").strip()
         except (EOFError, KeyboardInterrupt):
-            print()
-            _cancelled = True
-            break
-
-        if raw and raw[0] == '\x1b':
-            _cancelled = True
-            break
-
-        if not raw:
-            print(f"  {DIM}─ kept {display}{R}")
-            print()
-            continue
-
-        if raw.lower() == "r":
-            val = _DEFAULTS[name]
-        elif kind == "bool":
-            if raw.lower() in ("on", "1", "yes", "true"):
-                val = True
-            elif raw.lower() in ("off", "0", "no", "false"):
-                val = False
+            user_in = ""
+        new_v = v
+        if user_in.lower() == "r":
+            new_v = _DEFAULTS[name]
+        elif user_in:
+            if kind == "bool":
+                if user_in.lower() in ("on","1","yes","true"):   new_v = True
+                elif user_in.lower() in ("off","0","no","false"): new_v = False
+            elif kind == "pct":
+                try: new_v = float(user_in) / 100
+                except ValueError: pass
+            elif kind == "int":
+                try: new_v = int(float(user_in))
+                except ValueError: pass
             else:
-                print(f"  {RED}✘ enter on or off{R}")
-                print()
-                continue
-        else:
+                try: new_v = float(user_in)
+                except ValueError: pass
+        vals[name] = new_v
+        if new_v != v:
+            if kind == "pct":   new_display = f"{new_v*100:.1f}%"
+            elif kind == "bool": new_display = "on" if new_v else "off"
+            elif kind == "int":  new_display = str(int(new_v))
+            else:                new_display = str(new_v)
+            print(f"  {YEL}{BOLD}✔ {name} → {new_display}{R}")
+            time.sleep(0.8)
+        raw()
+
+    def confirm(msg):
+        cooked()
+        clear_screen()
+        print(f"\n  {YEL}{BOLD}{msg}{R}")
+        while True:
             try:
-                val = float(raw)
-                if kind == "pct": val = val / 100
-                if kind == "int": val = int(val)
-            except ValueError:
-                print(f"  {RED}✘ invalid value, keeping {display}{R}")
-                print()
-                continue
+                answer = input(f"  {DIM}[y/n]:{R} ").strip().lower()
+            except (EOFError, KeyboardInterrupt):
+                raw()
+                return False
+            if answer in ('y', 'yes'):
+                raw()
+                return True
+            if answer in ('n', 'no'):
+                raw()
+                return False
+            print(f"  {RED}Please type y or n.{R}")
 
-        if   name == "AUTO_SYNC":        AUTO_SYNC        = val
-        elif name == "WIN_THRESHOLD":    WIN_THRESHOLD    = val
-        elif name == "PRICE_SWEET_MAX":  PRICE_SWEET_MAX  = val
-        elif name == "FLIP_THRESHOLD":   FLIP_THRESHOLD   = val
-        elif name == "TAKE_PROFIT_PP":   TAKE_PROFIT_PP   = val
-        elif name == "STOP_LOSS_PP":     STOP_LOSS_PP     = val
-        elif name == "MAX_POSITIONS":    MAX_POSITIONS    = int(val)
-        elif name == "MIN_LIQUIDITY_Q":  MIN_LIQUIDITY_Q  = val
-        elif name == "MIN_COST":         MIN_COST         = val
-        elif name == "MAX_COST":         MAX_COST         = val
-        elif name == "MAX_POSITION_COST":MAX_POSITION_COST= val
-        elif name == "MAX_DAILY_SPEND":  MAX_DAILY_SPEND  = val
-        elif name == "SCORE_TOP_UP_DELTA":SCORE_TOP_UP_DELTA = val
-        elif name == "SLEEP_SECONDS":    SLEEP_SECONDS    = int(val)
-        elif name == "FORCE_ABOVE":      FORCE_ABOVE      = val
+    def edit_other():
+        sub_sel = 0
+        sub_n   = len(_other) + 1  # fields + Back
 
-        if kind == "pct":
-            new_display = f"{val*100:.1f}%"
-        elif kind == "bool":
-            new_display = "on" if val else "off"
-        elif kind == "int":
-            new_display = str(int(val))
-        else:
-            new_display = str(val)
+        def draw_other():
+            clear_screen()
+            p()
+            p(f"{BOLD}── Other Settings {'─'*40}{R}")
+            p()
+            for i, (name, kind) in enumerate(_other):
+                label   = DISPLAY.get(name, name)
+                v       = fmt(name, kind)
+                changed = vals[name] != _orig[name]
+                val_col = YEL if changed else ""
+                if i == sub_sel:
+                    p(f"  {CYN}{BOLD}→ {label:<22}{val_col}{v}{R}")
+                else:
+                    p(f"    {DIM}{label:<22}{R}{val_col}{v}{R}")
+            p()
+            p(f"  {'─'*54}")
+            p()
+            back_idx = len(_other)
+            if sub_sel == back_idx:
+                p(f"  {CYN}{BOLD}→ ← Back{R}")
+            else:
+                p(f"    {DIM}← Back{R}")
+            p()
+            p(f"  {DIM}[↑↓ / k i] navigate  [Enter] select  [Esc] back{R}")
 
-        if raw.lower() == "r":
-            print(f"  {YEL}↺ {name} reset to {new_display}{R}")
-        else:
-            print(f"  {GRN}✔ {name} → {new_display}{R}")
-        print()
+        while True:
+            draw_other()
+            key = read_key()
+            if key in ('UP', 'k'):
+                sub_sel = (sub_sel - 1) % sub_n
+            elif key in ('DOWN', 'i'):
+                sub_sel = (sub_sel + 1) % sub_n
+            elif key in ('ESC', 'CTRL_C', 'BACK'):
+                break
+            elif key == 'ENTER':
+                if sub_sel < len(_other):
+                    name, kind = _other[sub_sel]
+                    if kind == "bool":
+                        vals[name] = not vals[name]
+                    else:
+                        edit_field(name, kind)
+                else:
+                    break  # Back
 
-    if _cancelled:
-        _apply_config(_orig)
-        print(f"\n{DIM}Settings cancelled — no changes saved.{R}\n")
-    else:
-        save_config()
-        print(f"\n{BOLD}{'─'*58}{R}\n")
+    _old_term = None
+    if os.name != 'nt':
+        _old_term = termios.tcgetattr(sys.stdin)
+        tty.setraw(sys.stdin.fileno())
+
+    try:
+        while True:
+            draw()
+            key = read_key()
+            if key in ('UP', 'k'):
+                selected = (selected - 1) % n_items
+            elif key in ('DOWN', 'i'):
+                selected = (selected + 1) % n_items
+            elif key in ('ESC', 'CTRL_C'):
+                _apply_config(_orig)
+                break
+            elif key == 'ENTER':
+                if selected < OTHER_IDX:
+                    name, kind = _important[selected]
+                    if kind == "bool":
+                        vals[name] = not vals[name]
+                    else:
+                        edit_field(name, kind)
+                elif selected == OTHER_IDX:
+                    edit_other()
+                else:
+                    action = selected - OTHER_IDX - 1
+                    if action == 0:  # Save & Exit
+                        _apply_config(vals)
+                        save_config()
+                        break
+                    elif action == 1:  # Exit
+                        if confirm("Exit without saving? Changes will be lost."):
+                            _apply_config(_orig)
+                            break
+                    elif action == 2:  # Reset & Exit
+                        if confirm("Reset all settings to defaults?"):
+                            _apply_config(_DEFAULTS)
+                            save_config()
+                            break
+    finally:
+        if os.name != 'nt' and _old_term is not None:
+            termios.tcsetattr(sys.stdin, termios.TCSADRAIN, _old_term)
 
 # ── Position discovery ─────────────────────────────────────────────────────────
 
@@ -804,7 +940,7 @@ def run(positions: dict, api_key: str):
             if session_spend >= MAX_DAILY_SPEND or slots <= 0: break
             base_cost = trade_cost(s)
             cost = round(base_cost * (1 + s)) if rich else base_cost
-            cost = min(cost, MAX_DAILY_SPEND - session_spend)
+            cost = int(min(cost, MAX_DAILY_SPEND - session_spend))
             try:
                 result = client.trade(m["slug"], winner["id"],
                                       max_cost=cost, yes_no="yes")
@@ -859,7 +995,7 @@ def run(positions: dict, api_key: str):
             headroom   = MAX_POSITION_COST - pos.get("cost_spent", 0)
             base_cost  = trade_cost(cur_score)
             cost       = round(base_cost * (1 + cur_score)) if rich else base_cost
-            cost       = min(cost, headroom, MAX_DAILY_SPEND - session_spend)
+            cost       = int(min(cost, headroom, MAX_DAILY_SPEND - session_spend))
             if cost <= 0: continue
 
             try:
